@@ -1,0 +1,58 @@
+name: olive-rank
+
+on:
+  schedule:
+    - cron: "10 * * * *"
+  workflow_dispatch: {}
+
+concurrency:
+  group: olive-rank
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install
+        run: |
+          pip install playwright
+          playwright install --with-deps chromium
+
+      - name: Restore state
+        uses: actions/cache/restore@v4
+        with:
+          path: olive_rank_state.json
+          key: olive-rank-${{ github.run_id }}
+          restore-keys: |
+            olive-rank-
+
+      # 상품명을 가져오기 위해 재고 체크의 최신 상태도 읽어온다 (읽기만 함)
+      - name: Restore stock names
+        uses: actions/cache/restore@v4
+        with:
+          path: olive_stock_state.json
+          key: olive-stock-none-${{ github.run_id }}
+          restore-keys: |
+            olive-stock-
+
+      - name: Run monitor
+        env:
+          MODE: rank
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          GOODS_NO: ${{ secrets.GOODS_NO }}
+          RANK_URLS: ${{ secrets.RANK_URLS }}
+        run: python olive_monitor.py
+
+      - name: Save state
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: olive_rank_state.json
+          key: olive-rank-${{ github.run_id }}
