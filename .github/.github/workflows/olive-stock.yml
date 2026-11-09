@@ -1,0 +1,48 @@
+name: olive-stock
+
+on:
+  schedule:
+    - cron: "0,30 * * * *"
+  workflow_dispatch: {}
+
+concurrency:
+  group: olive-stock
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install
+        run: |
+          pip install playwright
+          playwright install --with-deps chromium
+
+      - name: Restore state
+        uses: actions/cache/restore@v4
+        with:
+          path: olive_stock_state.json
+          key: olive-stock-${{ github.run_id }}
+          restore-keys: |
+            olive-stock-
+
+      - name: Run monitor
+        env:
+          MODE: stock
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          GOODS_NO: ${{ secrets.GOODS_NO }}
+        run: python olive_monitor.py
+
+      - name: Save state
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: olive_stock_state.json
+          key: olive-stock-${{ github.run_id }}
