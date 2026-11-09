@@ -1,0 +1,52 @@
+name: olive-monitor
+
+on:
+  schedule:
+    # UTC 기준, 2시간마다. (한국 시간과 9시간 차이)
+    # 1시간마다 돌리려면 "0 * * * *" 로 바꾸세요. 무료 시간 한도에 주의.
+    - cron: "0 */2 * * *"
+  workflow_dispatch: {}   # Actions 탭에서 수동 실행 버튼용
+
+concurrency:
+  group: olive-monitor
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install
+        run: |
+          pip install playwright
+          playwright install --with-deps chromium
+
+      # 이전 실행의 상태 파일(olive_state.json)을 가져온다
+      - name: Restore state
+        uses: actions/cache/restore@v4
+        with:
+          path: olive_state.json
+          key: olive-state-${{ github.run_id }}
+          restore-keys: |
+            olive-state-
+
+      - name: Run monitor
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          RANK_URLS: ${{ secrets.RANK_URLS }}
+          GOODS_NO: ${{ secrets.GOODS_NO }}
+        run: python olive_monitor.py
+
+      # 이번 상태 파일을 다음 실행을 위해 저장한다 (캐시는 키가 매번 달라야 갱신됨)
+      - name: Save state
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: olive_state.json
+          key: olive-state-${{ github.run_id }}
