@@ -1,6 +1,6 @@
 """
 올리브영 여러 상품 x 여러 랭킹 페이지 모니터 → 슬랙 알림
-(빠른 실패 + 진행 로그 + 옵션별 품절 + 상품명 표시 + 오류 1회 알림 + 무변화 알림 버전)
+(빠른 실패 + 진행 로그 + 옵션별 품절 + 상품명 표시 + 오류 1회 알림 + 무변화 알림 + 랭킹 재시도 버전)
 
 환경변수
   SLACK_WEBHOOK_URL  (필수) 슬랙 Incoming Webhook 주소
@@ -27,14 +27,17 @@ RAW_GOODS = os.environ.get("GOODS_NO") or DEFAULT_GOODS
 GOODS = list(dict.fromkeys(g.strip() for g in RAW_GOODS.split(",") if g.strip()))
 ALWAYS = os.environ.get("ALWAYS_NOTIFY") == "1"
 DEFAULT_RANK = "전체|https://www.oliveyoung.co.kr/store/main/getBestList.do"
+MAIN_URL = "https://www.oliveyoung.co.kr/store/main/main.do"
 STATE_FILE = Path(__file__).with_name("olive_state.json")
 SLACK_CHUNK = 3000
 
 NAV_TIMEOUT = 25000      # 페이지 하나를 여는 데 기다리는 최대 시간(ms)
 TIME_LIMIT = 9 * 60      # 전체 실행 최대 시간(초). 넘으면 중간 결과만 처리
 MAX_CONSEC_FAIL = 4      # 연속 실패가 이만큼이면 접속 차단으로 보고 중단
+RANK_RETRY = 3           # 랭킹 페이지 최대 시도 횟수
 
 UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"
+STEALTH_JS = "Object.defineProperty(navigator, 'webdriver', {get: () => undefined}); Object.defineProperty(navigator, 'languages', {get: () => ['ko-KR', 'ko', 'en-US']}); window.chrome = {runtime: {}};"
 
 T0 = time.time()
 PRICE_RE = re.compile(r"\d[\d,]*\s*원")
@@ -72,20 +75,57 @@ def open_page(page, url):
     return status
 
 
-def fetch_ranking(page, url):
-    status = open_page(page, url)
-    for _ in range(4):
-        page.mouse.wheel(0, 4000)
-        page.wait_for_timeout(400)
+# ---------- 랭킹 ----------
+
+def collect_goods(page):
+    """페이지에 보이는 상품번호를 순서대로 수집"""
     hrefs = page.eval_on_selector_all("a[href*='goodsNo=']", "els => els.map(e => e.href)")
     seen = []
     for h in hrefs:
         m = re.search(r"goodsNo=([A-Za-z0-9]+)", h)
         if m and m.group(1) not in seen:
             seen.append(m.group(1))
-    if not seen:
-        raise RuntimeError(f"상품 못 찾음 (HTTP {status}, 제목 '{page.title()[:30]}')")
     return seen
+
+
+def fetch_ranking(page, url):
+    """랭킹 페이지에서 상품번호 목록을 순위대로 가져온다.
+    403이 와도 보안 확인이 자동 통과될 수 있으므로 기다려 보고, 실패하면 메인 페이지를 거쳐 재시도한다."""
+    last_err = None
+    for attempt in range(1, RANK_RETRY + 1):
+        try:
+            if attempt > 1:
+                log(f"랭킹 재시도 {attempt}/{RANK_RETRY} - 메인 페이지 경유")
+                try:
+                    page.goto(MAIN_URL, wait_until="domcontentloaded", timeout=NAV_TIMEOUT)
+                except Exception as e:
+                    log(f"메인 페이지 열기 실패(무시하고 진행): {str(e)[:60]}")
+                page.wait_for_timeout(random.randint(3000, 6000))
+
+            resp = page.goto(url, wait_until="domcontentloaded", timeout=NAV_TIMEOUT)
+            status = resp.status if resp else None
+
+            # 상품이 보일 때까지 최대 15초 대기 (보안 확인 화면 자동 통과 대기 포함)
+            seen = []
+            for _ in range(15):
+                page.wait_for_timeout(1000)
+                seen = collect_goods(page)
+                if seen:
+                    break
+            if not seen:
+                raise RuntimeError(f"HTTP {status}, 제목 '{page.title()[:30]}'")
+
+            for _ in range(4):
+                page.mouse.wheel(0, 4000)
+                page.wait_for_timeout(400)
+            seen = collect_goods(page)
+            if attempt > 1:
+                log(f"랭킹 재시도 {attempt}회차에 성공")
+            return seen
+        except Exception as e:
+            last_err = e
+            log(f"랭킹 시도 {attempt}/{RANK_RETRY} 실패: {str(e)[:80]}")
+    raise RuntimeError(str(last_err)[:100])
 
 
 # ---------- 상품명 ----------
@@ -229,7 +269,7 @@ def core(d):
 
 def main():
     if not GOODS:
-        sys.exit("상품번호가 없습니다.")
+        sys.exit("상품번호가 없습니다. (GOODS_NO Secret 확인)")
     rank_pages = parse_rank_urls()
     prev = json.loads(STATE_FILE.read_text()) if STATE_FILE.exists() else {}
     log(f"시작: 상품 {len(GOODS)}개, 랭킹 {len(rank_pages)}개")
@@ -241,8 +281,10 @@ def main():
     stopped = None
 
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
-        page = browser.new_context(user_agent=UA, locale="ko-KR").new_page()
+        browser = p.chromium.launch(headless=True, args=["--disable-blink-features=AutomationControlled"])
+        context = browser.new_context(user_agent=UA, locale="ko-KR", timezone_id="Asia/Seoul", viewport={"width": 1366, "height": 900})
+        context.add_init_script(STEALTH_JS)
+        page = context.new_page()
         try:
             for name, url in rank_pages:
                 if time.time() - T0 > TIME_LIMIT:
@@ -253,9 +295,8 @@ def main():
                     consec_fail = 0
                     log(f"랭킹 '{name}' 완료 ({len(rankings[name])}개 상품 보임)")
                 except Exception as e:
-                    consec_fail += 1
                     rank_errors.append(f"랭킹 '{name}' 실패: {str(e)[:100]}")
-                    log(f"랭킹 '{name}' 실패: {str(e)[:100]}")
+                    log(f"랭킹 '{name}' 최종 실패: {str(e)[:100]}")
                 time.sleep(random.uniform(0.5, 1.2))
 
             for i, g in enumerate(GOODS, 1):
@@ -310,8 +351,6 @@ def main():
             err = goods_errors.get(g, old.get("error"))
         now[g] = {"name": pname, "ranks": ranks, "soldout": soldout, "options": options, "error": err}
 
-    STATE_FILE.write_text(json.dumps(now, ensure_ascii=False))
-
     # 상품 오류는 '이번에 새로 생긴 것'만 표시 (지난번과 같은 오류면 생략)
     new_goods_errors = []
     for g, msg in goods_errors.items():
@@ -358,6 +397,10 @@ def main():
         checked = len(stock)
         post_slack(f"✅ [올리브영 {ts}] 상품 {len(GOODS)}개 체크했으나 변경점이 없습니다. (재고 확인 {checked}개, 랭킹 {len(rankings)}개)")
         log("변화 없음 → 슬랙 알림 전송")
+
+    # 슬랙 전송이 성공한 뒤에만 상태 저장 (전송 실패 시 다음 실행에서 다시 알림)
+    STATE_FILE.write_text(json.dumps(now, ensure_ascii=False))
+    log("상태 저장 완료")
     log("끝")
 
 
