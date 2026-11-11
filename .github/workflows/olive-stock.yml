@@ -13,6 +13,12 @@ jobs:
   run:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3]
+    env:
+      SHARDS: 4
     steps:
       - uses: actions/checkout@v4
 
@@ -20,29 +26,44 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: Cache Playwright browsers
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-1.65.0
+
       - name: Install
         run: |
-          pip install playwright
-          playwright install --with-deps chromium
+          pip install playwright==1.65.0
+          playwright install chromium
 
       - name: Restore state
         uses: actions/cache/restore@v4
         with:
           path: olive_stock_state.json
-          key: olive-stock-${{ github.run_id }}
+          key: olive-stock-s${{ matrix.shard }}-${{ github.run_id }}
           restore-keys: |
+            olive-stock-s${{ matrix.shard }}-
             olive-stock-
 
       - name: Run monitor
         env:
           MODE: stock
+          SHARD: ${{ matrix.shard }}
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
-          GOODS_NO: ${{ secrets.GOODS_NO }}
-        run: python olive_monitor.py
+          GOODS_NO_ALL: ${{ secrets.GOODS_NO }}
+        run: |
+          export GOODS_NO=$(python -c "
+          import os
+          g = list(dict.fromkeys(x.strip() for x in os.environ['GOODS_NO_ALL'].split(',') if x.strip()))
+          s, n = int(os.environ['SHARD']), int(os.environ['SHARDS'])
+          print(','.join(g[s::n]))
+          ")
+          python olive_monitor.py
 
       - name: Save state
         if: always()
         uses: actions/cache/save@v4
         with:
           path: olive_stock_state.json
-          key: olive-stock-${{ github.run_id }}
+          key: olive-stock-s${{ matrix.shard }}-${{ github.run_id }}
