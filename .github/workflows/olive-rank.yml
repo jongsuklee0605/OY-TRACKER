@@ -20,10 +20,16 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: Cache Playwright browsers
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-1.65.0
+
       - name: Install
         run: |
-          pip install playwright
-          playwright install --with-deps chromium
+          pip install playwright==1.65.0
+          playwright install chromium
 
       - name: Restore state
         uses: actions/cache/restore@v4
