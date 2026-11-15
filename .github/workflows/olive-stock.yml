@@ -43,7 +43,7 @@ jobs:
       - name: Run monitor
         env:
           MODE: stock
-          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_STOCK }}
           GOODS_NO: ${{ secrets.GOODS_NO }}
         run: python olive_monitor.py
 
