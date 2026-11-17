@@ -41,6 +41,8 @@ NAV_TIMEOUT = 25000      # 페이지 하나를 여는 데 기다리는 최대 �
 TIME_LIMIT = 9 * 60      # 전체 실행 최대 시간(초)
 MAX_CONSEC_FAIL = 4      # 연속 실패가 이만큼이면 접속 차단으로 보고 중단
 RANK_RETRY = 3           # 랭킹 페이지 최대 시도 횟수
+RETRY_403 = 1            # 403이 뜨면 같은 상품을 몇 번 더 시도할지
+WAIT_403 = (3, 5)        # 403 재시도 전 대기 시간 범위(초)
 
 UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"
 STEALTH_JS = "Object.defineProperty(navigator, 'webdriver', {get: () => undefined}); Object.defineProperty(navigator, 'languages', {get: () => ['ko-KR', 'ko', 'en-US']}); window.chrome = {runtime: {}};"
@@ -359,6 +361,21 @@ def get_stock(page, goods_no):
     return {"name": name, "soldout": all(options.values()), "options": options}
 
 
+def get_stock_with_403_retry(page, goods_no, label):
+    """403이 뜨면 잠깐 기다렸다가 같은 상품을 다시 확인. 다른 오류는 그대로 올려보냄."""
+    for attempt in range(RETRY_403 + 1):
+        try:
+            return get_stock(page, goods_no)
+        except NoStockInfo:
+            raise
+        except Exception as e:
+            if "HTTP 403" not in str(e) or attempt >= RETRY_403:
+                raise
+            wait = random.uniform(*WAIT_403)
+            log(f"{label} {goods_no} HTTP 403 → {wait:.0f}초 후 다시 확인 ({attempt + 1}/{RETRY_403})")
+            time.sleep(wait)
+
+
 def stock_label(so):
     return "확인 못함" if so is None else ("🔴 품절" if so else "🟢 판매중")
 
@@ -377,7 +394,7 @@ def run_stock(page, prev):
             stopped = f"연속 {consec_fail}회 실패 → 접속 차단 의심 ({i - 1}/{len(GOODS)}개 확인 후 중단)"
             break
         try:
-            stock[g] = get_stock(page, g)
+            stock[g] = get_stock_with_403_retry(page, g, f"[{i}/{len(GOODS)}]")
             consec_fail = 0
             s = stock[g]
             if s["options"]:
