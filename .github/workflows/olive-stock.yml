@@ -2,7 +2,7 @@ name: olive-stock
 
 on:
   schedule:
-    - cron: "17 */2 * * *"
+    - cron: "47 */2 * * *"   # cron-job.org가 멈췄을 때 대비한 1시간 간격 백업
   workflow_dispatch: {}
 
 concurrency:
@@ -13,6 +13,12 @@ jobs:
   run:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3]
+    env:
+      SHARDS: 4
     steps:
       - uses: actions/checkout@v4
 
@@ -35,21 +41,96 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: olive_stock_state.json
-          key: olive-stock-all-${{ github.run_id }}
+          key: olive-stock-s${{ matrix.shard }}-${{ github.run_id }}
           restore-keys: |
-            olive-stock-all-
+            olive-stock-s${{ matrix.shard }}-
             olive-stock-
 
       - name: Run monitor
         env:
           MODE: stock
+          SHARD: ${{ matrix.shard }}
+          SUMMARY_FILE: summary.json
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_STOCK }}
-          GOODS_NO: ${{ secrets.GOODS_NO }}
-        run: python olive_monitor.py
+          GOODS_NO_ALL: ${{ secrets.GOODS_NO }}
+        run: |
+          export GOODS_NO=$(python -c "
+          import os
+          g = list(dict.fromkeys(x.strip() for x in os.environ['GOODS_NO_ALL'].split(',') if x.strip()))
+          s, n = int(os.environ['SHARD']), int(os.environ['SHARDS'])
+          print(','.join(g[s::n]))
+          ")
+          python olive_monitor.py
 
       - name: Save state
         if: always()
         uses: actions/cache/save@v4
         with:
           path: olive_stock_state.json
-          key: olive-stock-all-${{ github.run_id }}
+          key: olive-stock-s${{ matrix.shard }}-${{ github.run_id }}
+
+      - name: Upload summary
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: summary-${{ matrix.shard }}
+          path: summary.json
+          if-no-files-found: ignore
+          retention-days: 1
+
+  notify:
+    needs: run
+    if: always()
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          pattern: summary-*
+          path: summaries
+
+      - name: Send combined message
+        env:
+          SHARDS: 4
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_STOCK }}
+          EVENT: ${{ github.event_name }}
+          HEARTBEAT_HOURS: "9,18"   # 생존 신고 보낼 시각(한국시간). 바꾸고 싶으면 숫자만 수정
+        run: |
+          python3 - <<'EOF'
+          import glob, json, os, urllib.request
+          from datetime import datetime, timezone, timedelta
+
+          def post(text):
+              req = urllib.request.Request(os.environ["SLACK_WEBHOOK_URL"],
+                                           data=json.dumps({"text": text}).encode(),
+                                           headers={"Content-Type": "application/json"})
+              urllib.request.urlopen(req, timeout=15)
+              print("슬랙 전송 완료")
+
+          n = int(os.environ["SHARDS"])
+          res = [json.load(open(f)) for f in glob.glob("summaries/*/summary.json")]
+          missing = n - len(res)
+          now = datetime.now(timezone(timedelta(hours=9)))
+          ts = now.strftime("%m/%d %H:%M")
+          goods = sum(r["goods"] for r in res)
+          checked = sum(r["checked"] for r in res)
+
+          if missing:
+              post(f"❗ [올리브영 재고 {ts}] {n}개 묶음 중 {missing}개가 결과 없이 끝났습니다. "
+                   f"Actions 로그를 확인해 주세요. (나머지 상품 {goods}개는 정상 처리)")
+              raise SystemExit
+          if any(r["issue"] for r in res):
+              print("이슈가 있는 묶음이 이미 상세 알림을 보냄 → 통합 알림 생략")
+              raise SystemExit
+
+          # 변화 없음 → 슬랙은 안 보내고 Actions 화면에만 '정상 동작' 표시
+          status = f"✅ 정상 동작 ({ts}) · 상품 {goods}개 중 {checked}개 확인, 변경점 없음"
+          print(status)
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as f:
+              f.write(status + "\n")
+
+          # 하루 정해진 시각에만 생존 신고
+          hours = [int(h) for h in os.environ.get("HEARTBEAT_HOURS", "").split(",") if h.strip()]
+          if os.environ.get("EVENT") == "schedule" and now.hour in hours:
+              post(f"💚 [올리브영 재고] 모니터 정상 동작 중 · {status}")
+          EOF
