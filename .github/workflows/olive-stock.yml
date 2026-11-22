@@ -91,7 +91,7 @@ jobs:
 
       - name: Send combined message
         env:
-          SHARDS: 4
+          SHARDS: 1
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_STOCK }}
           EVENT: ${{ github.event_name }}
           HEARTBEAT_HOURS: "9,18"   # 생존 신고 보낼 시각(한국시간). 바꾸고 싶으면 숫자만 수정
