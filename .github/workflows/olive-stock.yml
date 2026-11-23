@@ -2,7 +2,7 @@ name: olive-stock
 
 on:
   schedule:
-    - cron: "47 */2 * * *"   # cron-job.org가 멈췄을 때 대비한 1시간 간격 백업
+    - cron: "33 */2 * * *"   # cron-job.org가 멈췄을 때 대비한 1시간 간격 백업
   workflow_dispatch: {}
 
 concurrency:
